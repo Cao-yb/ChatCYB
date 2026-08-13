@@ -1,4 +1,5 @@
-import streamlit as st  
+import streamlit as st
+import uuid
 from backend import send_messages_to_LLM, extract_text
 
 # 侧边栏：用户输入 API 密钥
@@ -15,6 +16,12 @@ st.write("（基于DeepSeek 开发, 支持文字、部分文件处理）")
 # 用 session_state 保存聊天记录
 if "messages" not in st.session_state:
     st.session_state.messages = []
+
+# 每个浏览器会话分配一个独立的记忆编号：
+# 同一会话内连续对话有记忆；刷新页面后 session_state 清空会生成新编号，
+# 新对话即“失忆”，也避免不同用户之间的记忆串号
+if "thread_id" not in st.session_state:
+    st.session_state.thread_id = uuid.uuid4().hex
 
 # 展示历史消息
 for msg in st.session_state.messages:
@@ -53,6 +60,6 @@ if value := st.chat_input("请输入消息，回车发送", accept_file=True,
         st.warning("消息为空，请输入文字或上传文件")
     else:
         with st.spinner("思考中..."):
-            result = send_messages_to_LLM(user_text + file_text, deepseek_API_key)
+            result = send_messages_to_LLM(user_text + file_text, deepseek_API_key, st.session_state.thread_id)
         st.chat_message("assistant").markdown(result)
         st.session_state.messages.append({"role": "assistant", "content": result})
