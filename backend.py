@@ -6,6 +6,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 import io
 from docx import Document
+from pypdf import PdfReader
 
 
 # ---------- 解析上传文件为文本 ----------
@@ -20,6 +21,14 @@ def extract_text(filename, content):
                 for row in table.rows:
                     texts.append(" | ".join(cell.text for cell in row.cells))
             return "\n".join(texts)
+        elif name.endswith(".pdf"):
+            reader = PdfReader(io.BytesIO(content))
+            texts = []
+            for page in reader.pages:
+                text = page.extract_text()
+                if text:
+                    texts.append(text)
+            return "\n\n".join(texts)
         else:
             return content.decode("utf-8", errors="ignore")
     except Exception:

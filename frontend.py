@@ -31,7 +31,7 @@ for msg in st.session_state.messages:
 # 输入框：既支持输入文字，也支持上传 DeepSeek 能理解的文件（accept_file=True）
 if value := st.chat_input("请输入消息，回车发送", accept_file=True,
                           file_type=["txt", "md", "json", "csv", "py", "js", "html",
-                                     "xml", "yaml", "log", "docx"]):
+                                     "xml", "yaml", "log", "docx", "pdf"]):
     user_text = value.text or ""   # 用户输入的文字
 
     # 解析上传的文件为文本
