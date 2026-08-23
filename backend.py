@@ -1,22 +1,15 @@
 
 import os
 import io
-import warnings   # 用来关掉弃用警告
-import logging    # 用来管住日志输出
+import contextlib
 
 import pandas as pd
-
-# 这两行 = 只输出 AI 的回应，把运行时的英文警告都过滤掉
-warnings.filterwarnings("ignore")
-# 关掉 langchain-experimental 的停止维护提示（保留真正的报错）
-logging.getLogger("langchain_experimental").setLevel(logging.CRITICAL)
 
 from openai import OpenAI
 from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
 from langchain_core.tools import tool, StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
-from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
 
 from docx import Document
 from pypdf import PdfReader
@@ -120,39 +113,66 @@ def create_web_search_tool(api_key):
 # ============================
 def create_data_analysis_tool(llm, dataframes):
     """创建"数据分析"工具：底层让 LLM 写 pandas 代码并真正执行。
-    dataframes: [(文件名, DataFrame), ...]"""
-    dfs = [df for _, df in dataframes]
+    dataframes: [(文件名, DataFrame), ...]
+    说明：原实现基于 langchain-experimental 的 create_pandas_dataframe_agent，
+    该包已停止维护（DeprecationWarning），这里改用 langchain 1.x 官方的
+    create_agent + Python 执行工具实现同样的效果。
+    注意：与原来一样会执行 LLM 生成的代码（同等风险，仅限本地可信环境使用）。"""
+    # 执行环境：变量 df（多个表时为 df1、df2…）直接指向完整 DataFrame
+    env = {"pd": pd}
+    var_names = []
+    if len(dataframes) == 1:
+        env["df"] = dataframes[0][1]
+        var_names.append("df")
+    else:
+        for i, (_, df) in enumerate(dataframes, start=1):
+            env[f"df{i}"] = df
+            var_names.append(f"df{i}")
+
+    @tool
+    def python_exec(code: str) -> str:
+        """执行一段 Python/pandas 代码并返回 print 输出。数据在变量 df（多个表时为 df1、df2…）中，pandas 已导入为 pd。"""
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                exec(code, env)  # 与原 pandas agent 的 REPL 同等风险
+            return buf.getvalue() or "（代码无输出，请用 print() 打印结果）"
+        except Exception as e:
+            return f"代码执行出错：{type(e).__name__}: {e}"
+
     # 预览行数：小表（<=30行）直接全部展示，模型看到的就是完整数据，杜绝"把预览当全部"
-    head_rows = min(min(len(d) for d in dfs), 30)
-    data_agent = create_pandas_dataframe_agent(
+    head_rows = min(min(len(df) for _, df in dataframes), 30)
+    preview = "\n\n".join(
+        f"{var}（文件 {name}）预览：\n{df.head(head_rows).to_string()}"
+        for var, (name, df) in zip(var_names, dataframes)
+    )
+    vars_desc = "、".join(var_names)
+
+    data_agent = create_agent(
         llm,
-        dfs[0] if len(dfs) == 1 else dfs,  # 单个表直接传，多个表传列表（提示词里叫 df1、df2…）
-        agent_type="tool-calling",   # 官方推荐的新式 agent 类型（支持函数调用）
-        allow_dangerous_code=True,   # 官方强制要求：允许执行 LLM 生成的代码（有安全风险）
-        verbose=False,               # 不打印内部过程
-        number_of_head_rows=head_rows,
-        # 双保险提示：防止模型把预览的几行当成全部数据来统计
-        prefix=(
-            "你是一个专业的数据分析师。重要规则：提示词里展示的表格只是数据预览，"
-            "完整数据保存在变量 df（多个表时为 df1、df2…）中。"
+        tools=[python_exec],
+        system_prompt=(
+            "你是一个专业的数据分析师，请调用 python_exec 工具编写 pandas 代码来回答问题。"
+            "重要规则：提示词末尾的表格只是数据预览，完整数据保存在变量 "
+            f"{vars_desc} 中。"
             "任何统计计算（求和、计数、平均值、分组聚合等）都必须编写 pandas 代码、"
-            "基于完整的 df 执行，严禁只基于预览的几行数据直接得出结论。"
+            "基于完整的表执行，严禁只基于预览的几行数据直接得出结论。"
+            "如果代码报错，请修正后重试。"
             "最终回答中的统计结果必须用 markdown 表格呈现（一行一条记录），便于原样引用。"
-        ),
-        suffix=(
-            "再次提醒：预览表格可能只是完整数据的一部分，"
-            "所有统计必须写 pandas 代码基于完整 df 计算，禁止基于预览行数或预览内容直接作答。"
+            f"\n\n{preview}\n\n"
+            "再次提醒：上面的表格可能只是完整数据的一部分，"
+            "所有统计必须写 pandas 代码基于完整数据计算，禁止基于预览行数或预览内容直接作答。"
         ),
     )
 
     def run(query: str) -> str:
         try:
-            result = data_agent.invoke({"input": query})
+            result = data_agent.invoke({"messages": [("human", query)]})
             # 给返回值加"已核实"标记，贴着主 Agent 的生成点，降低转述时抄错数字的概率
             return (
                 "【已核实的计算结果】以下内容中的数字已由 pandas 精确计算，"
                 "请原样转述给用户，禁止修改、增删、四舍五入或重新计算任何数字：\n"
-                + str(result["output"])
+                + str(result["messages"][-1].content)
             )
         except Exception as e:
             return f"数据分析失败：{e}"
